@@ -29,7 +29,7 @@ write_display_config () {
     CONFIG_NAME=$1
 
     mkdir -p "$DISPLAY_CFG_PATH"
-    kscreen-doctor --json | jq -r '.outputs[] | "\(.id).\(.enabled)"' > "$DISPLAY_CFG_PATH/$CONFIG_NAME"
+    kscreen-doctor --json | jq -r '[.outputs[].modes[] | .["mode"] = .currentModeId | {"id", "enabled", "mode"}]' > "$DISPLAY_CFG_PATH/$CONFIG_NAME"
 }
 
 
