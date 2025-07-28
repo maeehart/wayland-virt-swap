@@ -1,3 +1,5 @@
+**NB:** Development is paused while I work on [edid-builder](https://github.com/That-Sasha/edid-builder) as this will be required to define fully custom display modes. Currently the scripts in this repo use EDID files ripped from monitors or found online, meaning the options are limited and compatibility is difficult to ensure.
+
 # nobara-vd
 Create virtual displays automatically on KDE Wayland for sunshine streaming.
 
