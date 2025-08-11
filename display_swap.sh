@@ -3,6 +3,29 @@ LOGFILE="$HOME/.config/userscripts/log.log"
 
 mkdir -p "$(dirname "$LOGFILE")"
 
+# Load configuration (connector names by DRM name, not numeric IDs)
+# Precedence: XDG config, ~/.config, script directory
+XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+CONFIG_CANDIDATES=(
+    "$XDG_CONFIG_HOME/userscripts/display_swap.conf"
+    "$HOME/.config/userscripts/display_swap.conf"
+    "$(cd "$(dirname "$0")" && pwd)/display_swap.conf"
+)
+for cfg in "${CONFIG_CANDIDATES[@]}"; do
+    if [ -f "$cfg" ]; then
+        # shellcheck disable=SC1090
+        . "$cfg"
+        echo "Loaded config: $cfg" >> "$LOGFILE"
+        break
+    fi
+done
+
+# Defaults (can be overridden in config):
+# PHYSICAL_CONNECTOR_NAME: name of the real monitor (e.g., DP-1)
+# VIRTUAL_CONNECTOR_NAME: name of the virtual connector (e.g., DP-2)
+PHYSICAL_CONNECTOR_NAME="${PHYSICAL_CONNECTOR_NAME:-DP-1}"
+VIRTUAL_CONNECTOR_NAME="${VIRTUAL_CONNECTOR_NAME:-}"
+
 get_virtual_connector_from_cmdline() {
     # Extract connector from drm.edid_firmware=<CONNECTOR>:edid/...
     local token
@@ -11,6 +34,22 @@ get_virtual_connector_from_cmdline() {
         echo ""; return 0
     fi
     echo "${token#drm.edid_firmware=}" | awk -F: '{print $1}'
+}
+
+get_virtual_connector_name() {
+    # Priority: configured var -> kernel cmdline -> DP-2
+    if [ -n "$VIRTUAL_CONNECTOR_NAME" ]; then
+        echo "$VIRTUAL_CONNECTOR_NAME"; return 0
+    fi
+    local from_cmdline
+    from_cmdline=$(get_virtual_connector_from_cmdline)
+    if [ -n "$from_cmdline" ]; then echo "$from_cmdline"; return 0; fi
+    echo "DP-2"
+}
+
+get_physical_connector_name() {
+    # Config or default DP-1
+    echo "$PHYSICAL_CONNECTOR_NAME"
 }
 
 get_output_id_by_name() {
@@ -66,6 +105,35 @@ run_kscreen_doctor () {
     echo "==================== KSCREEN COMMAND END ====================" >> "$LOGFILE"
     
     return $RET
+}
+
+# Helpers to inspect output state
+is_output_enabled() {
+    local out_id="$1"
+    kscreen-doctor --json 2>/dev/null | jq -r --arg id "$out_id" '.outputs[] | select(.id==($id|tonumber)) | .enabled' 2>/dev/null || echo "false"
+}
+
+is_output_primary() {
+    local out_id="$1"
+    kscreen-doctor --json 2>/dev/null | jq -r --arg id "$out_id" '.outputs[] | select(.id==($id|tonumber)) | .primary' 2>/dev/null || echo "false"
+}
+
+is_output_connected() {
+    local out_id="$1"
+    # Some versions may not expose .connected; treat missing as true to avoid false negatives
+    local val
+    val=$(kscreen-doctor --json 2>/dev/null | jq -r --arg id "$out_id" '(.outputs[] | select(.id==($id|tonumber)) | .connected) // true' 2>/dev/null || echo "true")
+    echo "$val"
+}
+
+get_first_connected_physical_id() {
+    local virt_id="$1"
+    # Prefer a connected physical output
+    local cand
+    cand=$(kscreen-doctor --json 2>/dev/null | jq -r --arg vid "$virt_id" '.outputs[] | select(.id != ($vid|tonumber)) | select((.connected // true) == true) | .id' 2>/dev/null | head -n1)
+    if [ -n "$cand" ]; then echo "$cand"; return 0; fi
+    # Fallback: any non-virtual output
+    kscreen-doctor --json 2>/dev/null | jq -r --arg vid "$virt_id" '.outputs[] | select(.id != ($vid|tonumber)) | .id' 2>/dev/null | head -n1
 }
 
 # Find a mode id on a given output matching the provided resolution and ~60Hz
@@ -184,7 +252,7 @@ only_virtual () {
     echo "ONLY_VIRTUAL: Starting at $(date)" >> "$LOGFILE"
     echo "ONLY_VIRTUAL: Mode parameter: '$mode_param'" >> "$LOGFILE"
     
-    virt_name=$(get_virtual_connector_from_cmdline)
+    virt_name=$(get_virtual_connector_name)
     echo "ONLY_VIRTUAL: Virtual connector from cmdline: '$virt_name'" >> "$LOGFILE"
     
     if [ -z "$virt_name" ]; then
@@ -199,6 +267,9 @@ only_virtual () {
         echo "ONLY_VIRTUAL: ERROR - Virtual connector '$virt_name' not found in kscreen outputs" >> "$LOGFILE"
         return 1
     fi
+    phys_name=$(get_physical_connector_name)
+    phys_id=$(get_output_id_by_name "$phys_name")
+    echo "ONLY_VIRTUAL: Physical connector: '$phys_name' (id: ${phys_id:-unknown})" >> "$LOGFILE"
     
     # Enable virtual output first
     echo "ONLY_VIRTUAL: Enabling virtual output $virt_id ($virt_name)" >> "$LOGFILE"
@@ -228,20 +299,18 @@ only_virtual () {
         fi
     fi
     
-    # Disable all physical outputs (but never end up with all outputs disabled)
-    for out in $(kscreen-doctor --json 2>/dev/null | jq -r '.outputs[] | .id' 2>/dev/null || echo ""); do
-      if [ "$out" != "$virt_id" ]; then
-        name=$(kscreen-doctor --json 2>/dev/null | jq -r --arg id "$out" '.outputs[] | select(.id==($id|tonumber)) | .name' 2>/dev/null || echo "unknown")
-        echo "ONLY_VIRTUAL: Disabling physical output $out ($name)" >> "$LOGFILE"
-        # Safety: ensure virtual is still enabled before disabling this output
+    # Disable the configured physical output only (avoid relying on numeric indices)
+    if [ -n "$phys_id" ]; then
+        echo "ONLY_VIRTUAL: Disabling physical output $phys_id ($phys_name)" >> "$LOGFILE"
         virt_enabled=$(kscreen-doctor --json 2>/dev/null | jq -r --arg id "$virt_id" '.outputs[] | select(.id==($id|tonumber)) | .enabled' 2>/dev/null || echo "true")
         if [ "$virt_enabled" = "true" ]; then
-            run_kscreen_doctor "kscreen-doctor output.$out.disable"
+            run_kscreen_doctor "kscreen-doctor output.$phys_id.disable"
         else
-            echo "ONLY_VIRTUAL: Skipping disable of $out because virtual output is not reported enabled" >> "$LOGFILE"
+            echo "ONLY_VIRTUAL: Skipping disable of $phys_id because virtual output is not reported enabled" >> "$LOGFILE"
         fi
-      fi
-    done
+    else
+        echo "ONLY_VIRTUAL: WARNING - Physical connector '$phys_name' not found; leaving it unchanged" >> "$LOGFILE"
+    fi
     
     echo "ONLY_VIRTUAL: Completed at $(date)" >> "$LOGFILE"
     echo "==================== ONLY_VIRTUAL END ====================" >> "$LOGFILE"
@@ -251,34 +320,50 @@ only_physical () {
     echo "==================== ONLY_PHYSICAL START ====================" >> "$LOGFILE"
     echo "ONLY_PHYSICAL: Starting at $(date)" >> "$LOGFILE"
     
-    # Ensure at least one physical output is enabled before touching the virtual one
-    virt_name=$(get_virtual_connector_from_cmdline)
+    # Ensure at least one physical output is enabled and primary before touching the virtual one
+    virt_name=$(get_virtual_connector_name)
     echo "ONLY_PHYSICAL: Virtual connector: '$virt_name'" >> "$LOGFILE"
     virt_id=""; [ -n "$virt_name" ] && virt_id=$(get_output_id_by_name "$virt_name")
+    phys_name=$(get_physical_connector_name)
+    phys_id=$(get_output_id_by_name "$phys_name")
+    echo "ONLY_PHYSICAL: Physical connector: '$phys_name' (id: ${phys_id:-unknown})" >> "$LOGFILE"
 
-    # Enable the first physical output (if disabled)
-    for out in $(kscreen-doctor --json 2>/dev/null | jq -r '.outputs[].id' 2>/dev/null || echo ""); do
-        if [ -n "$virt_id" ] && [ "$out" = "$virt_id" ]; then
-            continue
-        fi
-        enabled=$(kscreen-doctor --json 2>/dev/null | jq -r --arg id "$out" '.outputs[] | select(.id==($id|tonumber)) | .enabled' 2>/dev/null || echo "false")
-        name=$(kscreen-doctor --json 2>/dev/null | jq -r --arg id "$out" '.outputs[] | select(.id==($id|tonumber)) | .name' 2>/dev/null || echo "unknown")
-        if [ "$enabled" != "true" ]; then
-            echo "ONLY_PHYSICAL: Enabling physical display $out ($name)" >> "$LOGFILE"
-            run_kscreen_doctor "kscreen-doctor output.$out.enable"
-        else
-            echo "ONLY_PHYSICAL: Physical display $out ($name) already enabled" >> "$LOGFILE"
-        fi
-        # Set as primary and stop after first physical
-        echo "ONLY_PHYSICAL: Setting physical display $out ($name) as primary" >> "$LOGFILE"
-        run_kscreen_doctor "kscreen-doctor output.$out.primary"
-        break
+    if [ -z "$phys_id" ]; then
+        echo "ONLY_PHYSICAL: ERROR - Physical connector '$phys_name' not found; cannot disable virtual" >> "$LOGFILE"
+        echo "==================== ONLY_PHYSICAL END ====================" >> "$LOGFILE"
+        return 1
+    fi
+
+    # Enable if needed
+    if [ "$(is_output_enabled "$phys_id")" != "true" ]; then
+        echo "ONLY_PHYSICAL: Enabling physical display $phys_id ($phys_name)" >> "$LOGFILE"
+        run_kscreen_doctor "kscreen-doctor output.$phys_id.enable"
+    else
+        echo "ONLY_PHYSICAL: Physical display $phys_id ($phys_name) already enabled" >> "$LOGFILE"
+    fi
+
+    # Wait until enabled (up to ~3s)
+    for i in 1 2 3 4 5 6; do
+        if [ "$(is_output_enabled "$phys_id")" = "true" ]; then break; fi
+        sleep 0.5
     done
+    echo "ONLY_PHYSICAL: Physical enabled state now: $(is_output_enabled "$phys_id")" >> "$LOGFILE"
 
-    # Small wait before touching the virtual output
-    sleep 1
+    # Set as primary
+    echo "ONLY_PHYSICAL: Setting physical display $phys_id ($phys_name) as primary" >> "$LOGFILE"
+    run_kscreen_doctor "kscreen-doctor output.$phys_id.primary"
 
-    # Now disable the virtual output if present
+    # Wait until primary (up to ~3s)
+    for i in 1 2 3 4 5 6; do
+        if [ "$(is_output_primary "$phys_id")" = "true" ]; then break; fi
+        sleep 0.5
+    done
+    echo "ONLY_PHYSICAL: Physical primary state now: $(is_output_primary "$phys_id")" >> "$LOGFILE"
+
+    # Small stabilization delay
+    sleep 0.2
+
+    # Now disable the virtual output if present, in an atomic operation
     if [ -n "$virt_id" ]; then
         # Before disabling, drop the virtual to a conservative 60Hz mode to reduce link retrain stress
         safe_mode=$(pick_virtual_safe_mode "$virt_id")
@@ -289,8 +374,18 @@ only_physical () {
         else
             echo "ONLY_PHYSICAL: No safe 60Hz mode found for virtual display; proceeding to disable" >> "$LOGFILE"
         fi
-        echo "ONLY_PHYSICAL: Disabling virtual display $virt_id ($virt_name)" >> "$LOGFILE"
-        run_kscreen_doctor "kscreen-doctor output.$virt_id.disable"
+
+    echo "ONLY_PHYSICAL: Disabling virtual display $virt_id ($virt_name) with atomic apply (keep $phys_name primary)" >> "$LOGFILE"
+    run_kscreen_doctor "kscreen-doctor output.$phys_id.enable output.$phys_id.primary output.$virt_id.disable"
+
+        # Verify and retry briefly if still enabled (handles kscreen-doctor misleading exit codes)
+        for i in 1 2 3; do
+            virt_enabled=$(is_output_enabled "$virt_id")
+            if [ "$virt_enabled" = "false" ]; then break; fi
+            echo "ONLY_PHYSICAL: Virtual still enabled after attempt $i; waiting and retrying disable" >> "$LOGFILE"
+            sleep 0.5
+            run_kscreen_doctor "kscreen-doctor output.$phys_id.enable output.$phys_id.primary output.$virt_id.disable"
+        done
     fi
 
     # Do NOT change DP-1 (or any physical) resolution here

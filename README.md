@@ -15,6 +15,7 @@ This fork targets KDE Wayland on Arch Linux with zsh, but works on Fedora/Ubuntu
     - Never changes your physical display (DP-1) resolution.
     - Avoids all-off conditions and DPMS flapping.
     - Accepts mode selection by WxH@Hz (preferred) or legacy mode id; resolves IDs dynamically from kscreen-doctor JSON.
+    - Always targets outputs by connector names (e.g., DP-1, DP-2), not by numeric indices.
 
 ## Requirements
 - KDE Wayland session
@@ -43,6 +44,32 @@ It will:
     - video=<CONNECTOR>:<WxH>@<Hz>e
 
 3) Reboot to apply kernel parameters and initramfs changes.
+
+## Configuration (connector names, not indices)
+Numeric output indices (like output.1) and mode ids are not stable across boots. This tool uses DRM connector names (e.g., DP-1 for the physical monitor, DP-2 for the virtual one).
+
+You can configure connector names in a simple shell config file. Search order (first wins):
+- $XDG_CONFIG_HOME/userscripts/display_swap.conf
+- ~/.config/userscripts/display_swap.conf
+- ./display_swap.conf (next to the script)
+
+Example config (see display_swap.conf in this repo):
+
+```sh
+# Physical/real monitor connector name
+PHYSICAL_CONNECTOR_NAME=DP-1
+
+# Virtual connector name
+# If omitted, the script tries to read it from the kernel cmdline (drm.edid_firmware=...)
+# and falls back to DP-2.
+VIRTUAL_CONNECTOR_NAME=DP-2
+```
+
+Tip: Verify the names in your session with:
+
+```zsh
+kscreen-doctor --json | jq -r '.outputs[] | {id, name, enabled, primary}'
+```
 
 ## Usage
 - Switch to virtual-only (DP-2 primary, physical off):
