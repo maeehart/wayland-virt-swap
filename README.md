@@ -95,32 +95,6 @@ If you have multiple GPUs, target the one you want:
     - KWin crashes: `coredumpctl list kwin_wayland` then `coredumpctl info kwin_wayland`
 - You can increase the waits in display_swap.sh slightly if your compositor/GPU needs more time.
 
-## Forking and renaming this project
-This repository is a fork/derivative of https://github.com/That-Sasha/nobara-vd.
-
-To keep your repo as a fork while renaming it:
-
-1) Fork upstream on GitHub (web) to your account/org.
-2) Rename the fork in the repo Settings to your preferred name.
-3) In this local checkout, repoint remotes:
-
-```zsh
-# Keep upstream pointing to the original
-git remote rename origin upstream
-git remote add origin https://github.com/<your-username>/<new-repo-name>.git
-git fetch origin
-git push -u origin main
-```
-
-Alternatively, with GitHub CLI (gh):
-
-```zsh
-gh repo fork That-Sasha/nobara-vd --remote=true --clone=false
-gh repo rename <new-repo-name> --repo <your-username>/nobara-vd
-git remote set-url origin https://github.com/<your-username>/<new-repo-name>.git
-```
-
-Replace `<your-username>` and `<new-repo-name>` accordingly. After this, submit PRs upstream by pushing branches to your fork and opening PRs against `That-Sasha/nobara-vd`.
 
 ## Disclaimer
 Environment-specific caveats apply. Tested on KDE Wayland with a single dGPU.
