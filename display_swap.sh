@@ -18,6 +18,20 @@ get_output_id_by_name() {
     kscreen-doctor --json | jq -r --arg N "$name" '.outputs[] | select(.name==$N) | .id' | head -n1
 }
 
+# Parse a mode spec like 1920x1080@60 into W H Hz
+parse_mode_spec() {
+    local spec="$1"
+    if echo "$spec" | grep -Eq '^[0-9]+x[0-9]+@[0-9]+'; then
+        local W=$(echo "$spec" | cut -dx -f1)
+        local rest=$(echo "$spec" | cut -dx -f2)
+        local H=$(echo "$rest" | cut -d@ -f1)
+        local Hz=$(echo "$rest" | cut -d@ -f2)
+        echo "$W $H $Hz"
+    else
+        echo ""
+    fi
+}
+
 log_debug_env () {
     echo "==================== DEBUG ENV START ====================" >> "$LOGFILE"
     echo "DEBUG: Timestamp: $(date)" >> "$LOGFILE"
@@ -80,6 +94,50 @@ pick_virtual_safe_mode () {
         mode_id=$(kscreen-doctor --json 2>/dev/null | jq -r --arg id "$virt_id" '.outputs[] | select(.id==($id|tonumber)) | .modes[] | select((.refreshRate|tostring|startswith("60")) or (.name? // "" | test("@60(\\.\\d+)?$"))) | .id' 2>/dev/null | head -n1)
     fi
     echo "$mode_id"
+}
+
+# Find a mode id by WxH@Hz for a given output id
+find_mode_id_by_spec() {
+    local out_id="$1"; local W="$2"; local H="$3"; local Hz="$4"
+    # Pass 1: exact name contains @Hz
+    local id
+    id=$(kscreen-doctor --json 2>/dev/null | jq -r --arg id "$out_id" --argjson W "$W" --argjson H "$H" --arg Hz "$Hz" '
+        .outputs[] | select(.id==($id|tonumber)) | .modes[]
+        | select(.size.width==$W and .size.height==$H and ((.name? // "") | test("@\($Hz)(\\.\\d+)?$")))
+        | .id' 2>/dev/null | head -n1)
+    if [ -n "$id" ]; then echo "$id"; return 0; fi
+    # Pass 2: numeric refreshRate starts with Hz (string compare)
+    id=$(kscreen-doctor --json 2>/dev/null | jq -r --arg id "$out_id" --argjson W "$W" --argjson H "$H" --arg Hz "$Hz" '
+        .outputs[] | select(.id==($id|tonumber)) | .modes[]
+        | select(.size.width==$W and .size.height==$H and ((.refreshRate|tostring) | startswith($Hz)))
+        | .id' 2>/dev/null | head -n1)
+    if [ -n "$id" ]; then echo "$id"; return 0; fi
+    # Pass 3: any matching WxH (fallback)
+    id=$(kscreen-doctor --json 2>/dev/null | jq -r --arg id "$out_id" --argjson W "$W" --argjson H "$H" '
+        .outputs[] | select(.id==($id|tonumber)) | .modes[]
+        | select(.size.width==$W and .size.height==$H) | .id' 2>/dev/null | head -n1)
+    echo "$id"
+}
+
+# Set output mode by spec string like 1920x1080@60. Returns 0 on success.
+set_output_mode_by_spec() {
+    local out_id="$1"; local spec="$2"
+    local parsed; parsed=$(parse_mode_spec "$spec" || true)
+    if [ -z "$parsed" ]; then
+        return 1
+    fi
+    local W H Hz
+    read -r W H Hz <<EOF
+$parsed
+EOF
+    local mode_id; mode_id=$(find_mode_id_by_spec "$out_id" "$W" "$H" "$Hz")
+    if [ -n "$mode_id" ]; then
+        echo "Setting output $out_id to $Wx${H}@${Hz} via mode id $mode_id" >> "$LOGFILE"
+        run_kscreen_doctor "kscreen-doctor output.$out_id.mode.$mode_id"
+        return 0
+    fi
+    echo "Could not find mode for $Wx${H}@${Hz} on output $out_id" >> "$LOGFILE"
+    return 2
 }
 
 log_debug_env_after () {
@@ -149,10 +207,15 @@ only_virtual () {
     # Give the compositor a beat to flip primary before disabling others
     sleep 0.5
     
-    # Set resolution if mode parameter provided
+    # Set resolution if mode parameter provided (supports id or WxH@Hz)
     if [ -n "$mode_param" ]; then
-        echo "ONLY_VIRTUAL: Setting virtual display to mode $mode_param" >> "$LOGFILE"
-        run_kscreen_doctor "kscreen-doctor output.$virt_id.mode.$mode_param"
+        if echo "$mode_param" | grep -Eq '^[0-9]+x[0-9]+@[0-9]+'; then
+            echo "ONLY_VIRTUAL: Setting virtual display to $mode_param (by spec)" >> "$LOGFILE"
+            set_output_mode_by_spec "$virt_id" "$mode_param" || echo "ONLY_VIRTUAL: Failed to set by spec; will try safe 60Hz fallback" >> "$LOGFILE"
+        else
+            echo "ONLY_VIRTUAL: Setting virtual display to mode id $mode_param" >> "$LOGFILE"
+            run_kscreen_doctor "kscreen-doctor output.$virt_id.mode.$mode_param"
+        fi
     else
         # Default to a conservative 60Hz mode on the virtual display
         safe_mode=$(pick_virtual_safe_mode "$virt_id")

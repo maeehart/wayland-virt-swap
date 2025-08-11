@@ -14,6 +14,7 @@ This fork targets KDE Wayland on Arch Linux with zsh, but works on Fedora/Ubuntu
     - --only-physical: enables a physical output, sets it primary, drops the virtual to a safe 60 Hz, then disables it.
     - Never changes your physical display (DP-1) resolution.
     - Avoids all-off conditions and DPMS flapping.
+    - Accepts mode selection by WxH@Hz (preferred) or legacy mode id; resolves IDs dynamically from kscreen-doctor JSON.
 
 ## Requirements
 - KDE Wayland session
@@ -50,7 +51,24 @@ It will:
 ./display_swap.sh --only-virtual
 ```
 
-    - Optional: pass a specific mode id for the virtual output (from `kscreen-doctor --json`). When omitted, a safe 60 Hz mode is chosen automatically.
+- Optional mode selection for the virtual output:
+    - Pass a mode by resolution and refresh: WxH@Hz (preferred because mode IDs can change between boots)
+
+```zsh
+# Examples (preferred):
+./display_swap.sh --only-virtual 1920x1080@60
+./display_swap.sh --only-virtual 2560x1440@60
+./display_swap.sh --only-virtual 3840x2160@60
+```
+
+    - Or pass a legacy mode id (from `kscreen-doctor --json`):
+
+```zsh
+# Example (legacy):
+./display_swap.sh --only-virtual 5
+```
+
+    - When no mode is provided, a safe 60 Hz mode is chosen automatically.
 
 - Switch back to physical-only (DP-1 primary, virtual off):
 
@@ -63,6 +81,12 @@ Design guarantees:
 - Virtual output is kept to conservative 60 Hz to reduce link/pipeline shocks.
 - Safe sequencing avoids disabling all outputs.
 - Detailed logs are written to `~/.config/userscripts/log.log`.
+
+Tip: To see available modes for the virtual connector, inspect JSON and search for its name (e.g., DP-2):
+
+```zsh
+kscreen-doctor --json | jq '.outputs[] | select(.name=="DP-2") | .modes[] | {id, name, size, refreshRate}'
+```
 
 ## Sunshine integration
 - Configure Sunshine to stream the virtual display (the connector name, e.g., DP-2).
