@@ -1,24 +1,126 @@
-**NB:** Development is paused while I work on [edid-builder](https://github.com/That-Sasha/edid-builder) as this will be required to define fully custom display modes. Currently the scripts in this repo use EDID files ripped from monitors or found online, meaning the options are limited and compatibility is difficult to ensure.
+# Virtual Display Swap for KDE Wayland (fork of nobara-vd)
 
-# nobara-vd
-Create virtual displays automatically on KDE Wayland for sunshine streaming.
+Create a virtual display on KDE Wayland and safely switch between the virtual and the physical display. Designed to stream only the virtual screen with Sunshine, without touching your physical monitor’s resolution.
 
-## Current Features:
-- Download edid file, set kernel parameters and add to initramfs
-- Define streaming and default display configurations
-- Handle display switching for stream start and end
+This fork targets KDE Wayland on Arch Linux with zsh, but works on Fedora/Ubuntu as well. It supports both GRUB and systemd-boot and uses kscreen-doctor for output control.
 
-## Planned Features:
-- Prevent "no display connected" issue caused by dpms
-    - Currently working, waiting for refactor to check in
-- Auto-login and lock pc to enable sunshine on boot
-    - Currently working, waiting for refactor to check in
-- Enable virtual display on logout to prevent "no display connected" issue
-    - Currently working, waiting for refactor to check in
-- Automate changing host resolution to match client
-- Propper logging
+## What’s included
+- create_vd.sh: Sets up a virtual display by loading a known-good EDID and binding it to a disconnected DP/HDMI connector at boot.
+    - Adds the EDID to initramfs (dracut or mkinitcpio) for early availability.
+    - Updates your bootloader with drm.edid_firmware and a default video=<connector>:<WxH>@<Hz>e.
+    - Can target a specific GPU when multiple are present.
+- display_swap.sh: Robust swapper with safety guards.
+    - --only-virtual: enables the virtual output, sets it primary, defaults it to a safe 60 Hz mode, and disables physical outputs.
+    - --only-physical: enables a physical output, sets it primary, drops the virtual to a safe 60 Hz, then disables it.
+    - Never changes your physical display (DP-1) resolution.
+    - Avoids all-off conditions and DPMS flapping.
 
+## Requirements
+- KDE Wayland session
+- zsh (scripts are POSIX-sh friendly)
+- Packages: jq, kscreen-doctor (KDE), wget
+- Ideally a single visible DRM GPU (or explicitly target one via create_vd.sh)
 
-### Disclaimer:
+## Setup (GRUB or systemd-boot)
+1) Review defaults in create_vd.sh
+     - EDID_FILENAME defaults to an Acer XV273K profile.
+     - OUTPUT_TYPE defaults to DP.
 
-While this is currently in a semi-functional state, it's tuned entirely for my personal machine so I can't promise any results. If there are usage instructions in this readme, then this is no longer the case. This repo will probably be renamed at some point in the future. Virtually everything in here can be found with just a little google-fu, it's nothing special. 
+2) Run the setup script:
+
+```zsh
+chmod +x create_vd.sh display_swap.sh
+./create_vd.sh
+```
+
+It will:
+- Download the EDID to /usr/lib/firmware/edid/
+- Add it to initramfs (dracut or mkinitcpio)
+- Help you bind it to a disconnected connector (e.g., DP-2) and set a default mode
+- Update GRUB or systemd-boot with:
+    - drm.edid_firmware=<CONNECTOR>:edid/<EDID_FILENAME>
+    - video=<CONNECTOR>:<WxH>@<Hz>e
+
+3) Reboot to apply kernel parameters and initramfs changes.
+
+## Usage
+- Switch to virtual-only (DP-2 primary, physical off):
+
+```zsh
+./display_swap.sh --only-virtual
+```
+
+    - Optional: pass a specific mode id for the virtual output (from `kscreen-doctor --json`). When omitted, a safe 60 Hz mode is chosen automatically.
+
+- Switch back to physical-only (DP-1 primary, virtual off):
+
+```zsh
+./display_swap.sh --only-physical
+```
+
+Design guarantees:
+- Physical resolution is never changed.
+- Virtual output is kept to conservative 60 Hz to reduce link/pipeline shocks.
+- Safe sequencing avoids disabling all outputs.
+- Detailed logs are written to `~/.config/userscripts/log.log`.
+
+## Sunshine integration
+- Configure Sunshine to stream the virtual display (the connector name, e.g., DP-2).
+- Use hooks to swap displays around your session:
+
+```text
+prep do:   /full/path/display_swap.sh --only-virtual
+prep undo: /full/path/display_swap.sh --only-physical
+output:    DP-2   # your virtual connector name
+```
+
+Ensure Sunshine runs in the same KDE Wayland user session.
+
+## Multi-GPU (optional)
+If you have multiple GPUs, target the one you want:
+
+```zsh
+# Recommended: render node
+./create_vd.sh --render-node /dev/dri/renderD128
+
+# Or by DRM card name/index
+./create_vd.sh --card card1
+./create_vd.sh --card-index 1
+```
+
+## Troubleshooting
+- If you see artifacts when coming back to physical, ensure DP-1’s resolution is unchanged in the script (it is by default).
+- Check logs:
+    - System/user: `journalctl -b` and `journalctl --user -b`
+    - KWin crashes: `coredumpctl list kwin_wayland` then `coredumpctl info kwin_wayland`
+- You can increase the waits in display_swap.sh slightly if your compositor/GPU needs more time.
+
+## Forking and renaming this project
+This repository is a fork/derivative of https://github.com/That-Sasha/nobara-vd.
+
+To keep your repo as a fork while renaming it:
+
+1) Fork upstream on GitHub (web) to your account/org.
+2) Rename the fork in the repo Settings to your preferred name.
+3) In this local checkout, repoint remotes:
+
+```zsh
+# Keep upstream pointing to the original
+git remote rename origin upstream
+git remote add origin https://github.com/<your-username>/<new-repo-name>.git
+git fetch origin
+git push -u origin main
+```
+
+Alternatively, with GitHub CLI (gh):
+
+```zsh
+gh repo fork That-Sasha/nobara-vd --remote=true --clone=false
+gh repo rename <new-repo-name> --repo <your-username>/nobara-vd
+git remote set-url origin https://github.com/<your-username>/<new-repo-name>.git
+```
+
+Replace `<your-username>` and `<new-repo-name>` accordingly. After this, submit PRs upstream by pushing branches to your fork and opening PRs against `That-Sasha/nobara-vd`.
+
+## Disclaimer
+Environment-specific caveats apply. Tested on KDE Wayland with a single dGPU.
